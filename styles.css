@@ -123,8 +123,46 @@ button:disabled {
   background: #020617;
 }
 
-video,
-canvas {
+.coach-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.coach-stage {
+  border-radius: 14px;
+  overflow: hidden;
+  background: #020617;
+}
+
+#coachVideo {
+  width: 100%;
+  max-height: 360px;
+  object-fit: cover;
+  display: block;
+}
+
+.coach-status {
+  margin: 0;
+  color: #7dd3fc;
+}
+
+.coach-hint {
+  margin: 0;
+  color: #cbd5e1;
+  font-size: 13px;
+}
+
+input[type="file"] {
+  border: 1px dashed rgba(148, 163, 184, 0.45);
+  border-radius: 10px;
+  padding: 8px;
+  background: rgba(51, 65, 85, 0.35);
+  color: var(--text);
+}
+
+.camera-stage video,
+.camera-stage canvas {
   position: absolute;
   inset: 0;
   width: 100%;

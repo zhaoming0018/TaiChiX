@@ -20,6 +20,13 @@ const adviceList = document.getElementById("adviceList");
 const voiceGuideToggle = document.getElementById("voiceGuideToggle");
 const videoElement = document.getElementById("video");
 const canvasElement = document.getElementById("overlay");
+const coachVideo = document.getElementById("coachVideo");
+const coachSourceSelect = document.getElementById("coachSourceSelect");
+const coachUpload = document.getElementById("coachUpload");
+const coachStatus = document.getElementById("coachStatus");
+const coachPlayBtn = document.getElementById("coachPlayBtn");
+const coachRestartBtn = document.getElementById("coachRestartBtn");
+const coachHint = document.getElementById("coachHint");
 const canvasCtx = canvasElement.getContext("2d");
 
 const ROUTINES = [
@@ -148,12 +155,21 @@ const ROUTINES = [
   },
 ];
 
+const COACH_VIDEO_SOURCES = [
+  {
+    id: "archive_taichi_health",
+    name: "内置真人太极教学（Tai Chi For Health）",
+    url: "https://ia902804.us.archive.org/20/items/tai-chi-for-health/Tai%20Chi%20for%20Health.mp4",
+  },
+];
+
 let poseDetector = null;
 let camera = null;
 let cameraOn = false;
 let latestLandmarks = null;
 let demoMode = false;
 let demoLoopHandle = null;
+let coachObjectUrl = null;
 
 let session = {
   running: false,
@@ -205,8 +221,20 @@ function formatMetricValue(metricName, value) {
   return `${value.toFixed(1)}`;
 }
 
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds)) return "--:--";
+  const total = Math.max(0, Math.round(seconds));
+  const min = String(Math.floor(total / 60)).padStart(2, "0");
+  const sec = String(total % 60).padStart(2, "0");
+  return `${min}:${sec}`;
+}
+
 function updateStatus(text) {
   statusText.textContent = `状态：${text}`;
+}
+
+function setCoachStatus(text) {
+  coachStatus.textContent = `示范视频：${text}`;
 }
 
 function calcAngle(a, b, c) {
@@ -361,6 +389,51 @@ function renderRealtimeFollow(step, frameResult) {
   });
 }
 
+function updateCoachPlayButton() {
+  coachPlayBtn.textContent = coachVideo.paused ? "播放示范视频" : "暂停示范视频";
+}
+
+function loadCoachVideo(url, sourceLabel, fromUpload = false) {
+  coachVideo.src = url;
+  coachVideo.load();
+  const suffix = fromUpload ? "（本地上传）" : "";
+  setCoachStatus(`正在加载：${sourceLabel}${suffix}`);
+  coachHint.textContent = "提示：点击“开始整套”后会自动播放示范视频。";
+  updateCoachPlayButton();
+}
+
+function maybePlayCoachVideo() {
+  if (coachVideo.readyState < 2) return;
+  if (Number.isFinite(coachVideo.duration) && coachVideo.currentTime > coachVideo.duration - 5) {
+    coachVideo.currentTime = 0;
+  }
+  coachVideo
+    .play()
+    .then(() => {
+      setCoachStatus("示范视频播放中");
+      updateCoachPlayButton();
+    })
+    .catch(() => {
+      setCoachStatus("自动播放失败，请点击“播放示范视频”");
+      updateCoachPlayButton();
+    });
+}
+
+function populateCoachSources() {
+  coachSourceSelect.innerHTML = "";
+  COACH_VIDEO_SOURCES.forEach((source) => {
+    const option = document.createElement("option");
+    option.value = source.id;
+    option.textContent = source.name;
+    coachSourceSelect.appendChild(option);
+  });
+  const first = COACH_VIDEO_SOURCES[0];
+  if (first) {
+    coachSourceSelect.value = first.id;
+    loadCoachVideo(first.url, first.name, false);
+  }
+}
+
 function speak(text) {
   if (!voiceGuideToggle.checked || !window.speechSynthesis) return;
   window.speechSynthesis.cancel();
@@ -432,6 +505,7 @@ function enterStep(stepIndex) {
   stepTimerEl.textContent = `${displaySeconds.toFixed(1)} 秒`;
   guideText.textContent = step.guide;
   liveHint.textContent = "实时提示：请开始该动作并保持稳定";
+  coachHint.textContent = `视频跟练动作：${step.name}（跟着示范视频节奏练习）`;
   liveScoreEl.textContent = "0";
   liveScoreEl.style.color = "var(--text)";
   renderRealtimeFollow(step, { score: 0, ruleScores: [] });
@@ -501,6 +575,7 @@ function finishSession() {
 
   liveHint.textContent = "实时提示：整套动作已完成";
   guideText.textContent = "训练完成，查看右侧总结并重复练习薄弱动作。";
+  coachHint.textContent = "提示：整套已完成，可回放示范视频继续跟练。";
   stepNameEl.textContent = "已完成";
   stepTimerEl.textContent = "0 秒";
   updateStatus(`训练完成，总分 ${formatScore(total)}（${grade}）`);
@@ -529,6 +604,7 @@ function startSession() {
   summaryText.textContent = `${session.routine.intro} 完成后会生成整套评分。`;
   adviceList.innerHTML = "";
   updateStatus(`开始训练：${session.routine.name}${demoMode ? "（演示模式）" : ""}`);
+  maybePlayCoachVideo();
   enterStep(0);
 
   if (demoMode) {
@@ -554,6 +630,9 @@ function resetSession() {
   const routine = getCurrentRoutine();
   renderStepList(routine);
   renderRealtimeFollow(routine.steps[0], { score: 0, ruleScores: [] });
+  if (!coachVideo.paused) coachVideo.pause();
+  coachHint.textContent = "提示：点击“开始整套”后会自动播放示范视频。";
+  updateCoachPlayButton();
   stepNameEl.textContent = "未开始";
   stepTimerEl.textContent = "--";
   guideText.textContent = "请按提示逐式完成动作。";
@@ -785,17 +864,20 @@ function toggleDemoMode() {
 }
 
 function init() {
+  populateCoachSources();
   renderRoutineOptions();
   routineSelect.value = ROUTINES[0].id;
   renderStepList(ROUTINES[0]);
   guideText.textContent = ROUTINES[0].intro;
   renderRealtimeFollow(ROUTINES[0].steps[0], { score: 0, ruleScores: [] });
+  updateCoachPlayButton();
 
   routineSelect.addEventListener("change", () => {
     const routine = getCurrentRoutine();
     renderStepList(routine);
     renderRealtimeFollow(routine.steps[0], { score: 0, ruleScores: [] });
     guideText.textContent = routine.intro;
+    coachHint.textContent = `提示：当前版本为 ${routine.name}，可按示范视频同步练习。`;
     liveHint.textContent = "实时提示：切换成功，请准备动作";
     updateStatus(`已切换版本：${routine.name}`);
     totalScoreEl.textContent = "--";
@@ -804,12 +886,57 @@ function init() {
     adviceList.innerHTML = "";
   });
 
+  coachSourceSelect.addEventListener("change", () => {
+    const source = COACH_VIDEO_SOURCES.find((item) => item.id === coachSourceSelect.value);
+    if (!source) return;
+    if (coachObjectUrl) {
+      URL.revokeObjectURL(coachObjectUrl);
+      coachObjectUrl = null;
+    }
+    coachUpload.value = "";
+    loadCoachVideo(source.url, source.name, false);
+  });
+
+  coachUpload.addEventListener("change", (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (coachObjectUrl) URL.revokeObjectURL(coachObjectUrl);
+    coachObjectUrl = URL.createObjectURL(file);
+    loadCoachVideo(coachObjectUrl, file.name, true);
+  });
+
+  coachPlayBtn.addEventListener("click", () => {
+    if (coachVideo.paused) {
+      maybePlayCoachVideo();
+    } else {
+      coachVideo.pause();
+      setCoachStatus("示范视频已暂停");
+      updateCoachPlayButton();
+    }
+  });
+
+  coachRestartBtn.addEventListener("click", () => {
+    coachVideo.currentTime = 0;
+    maybePlayCoachVideo();
+  });
+
+  coachVideo.addEventListener("loadedmetadata", () => {
+    setCoachStatus(`已就绪（时长 ${formatDuration(coachVideo.duration)}）`);
+  });
+  coachVideo.addEventListener("play", updateCoachPlayButton);
+  coachVideo.addEventListener("pause", updateCoachPlayButton);
+  coachVideo.addEventListener("error", () => {
+    setCoachStatus("加载失败，请切换内置视频或上传本地视频");
+    updateCoachPlayButton();
+  });
+
   cameraBtn.addEventListener("click", toggleCamera);
   demoBtn.addEventListener("click", toggleDemoMode);
   startBtn.addEventListener("click", startSession);
   resetBtn.addEventListener("click", resetSession);
   window.addEventListener("beforeunload", () => {
     if (window.speechSynthesis) window.speechSynthesis.cancel();
+    if (coachObjectUrl) URL.revokeObjectURL(coachObjectUrl);
   });
 }
 
