@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TaiChiX 太极跟练</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <h1>TaiChiX 太极跟练</h1>
+      <p>选择太极版本，开启摄像头，按引导完成整套动作并获得评分。</p>
+    </header>
+
+    <main class="layout">
+      <section class="panel controls-panel">
+        <h2>训练控制</h2>
+        <label for="routineSelect">太极版本</label>
+        <select id="routineSelect"></select>
+
+        <label class="switch">
+          <input id="voiceGuideToggle" type="checkbox" checked />
+          <span>启用语音引导</span>
+        </label>
+
+        <div class="button-row">
+          <button id="cameraBtn" type="button">开启摄像头</button>
+          <button id="startBtn" type="button" disabled>开始整套</button>
+          <button id="resetBtn" type="button" disabled>重置</button>
+        </div>
+
+        <p id="statusText" class="status">状态：等待开启摄像头</p>
+      </section>
+
+      <section class="panel camera-panel">
+        <h2>动作捕捉</h2>
+        <div class="camera-stage">
+          <video id="video" autoplay playsinline muted></video>
+          <canvas id="overlay"></canvas>
+        </div>
+      </section>
+
+      <section class="panel progress-panel">
+        <h2>引导与评分</h2>
+        <p class="step-name">当前动作：<strong id="stepName">未开始</strong></p>
+        <p class="timer">剩余时间：<strong id="stepTimer">--</strong></p>
+        <p id="guideText" class="guide">请先选择版本并开启摄像头。</p>
+        <p id="liveHint" class="hint">实时提示：等待姿态识别...</p>
+
+        <div class="score-box">
+          <p>当前动作得分</p>
+          <strong id="liveScore">0</strong>
+        </div>
+
+        <ol id="stepList" class="step-list"></ol>
+      </section>
+
+      <section class="panel summary-panel">
+        <h2>整套结果</h2>
+        <p>总评分：<strong id="totalScore">--</strong></p>
+        <p>评级：<strong id="grade">--</strong></p>
+        <p id="summaryText">完成训练后会给出总体建议。</p>
+        <ul id="adviceList" class="advice-list"></ul>
+      </section>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>
