@@ -1,5 +1,6 @@
 const routineSelect = document.getElementById("routineSelect");
 const cameraBtn = document.getElementById("cameraBtn");
+const demoBtn = document.getElementById("demoBtn");
 const startBtn = document.getElementById("startBtn");
 const resetBtn = document.getElementById("resetBtn");
 const statusText = document.getElementById("statusText");
@@ -148,6 +149,8 @@ let poseDetector = null;
 let camera = null;
 let cameraOn = false;
 let latestLandmarks = null;
+let demoMode = false;
+let demoLoopHandle = null;
 
 let session = {
   running: false,
@@ -159,6 +162,7 @@ let session = {
 };
 
 const REQUIRED_VISIBILITY = 0.42;
+const DEMO_TIME_SCALE = 0.2;
 const POSE_INDEX = {
   leftShoulder: 11,
   rightShoulder: 12,
@@ -261,14 +265,14 @@ function getMetricValue(landmarks, metricName) {
   return fn ? fn() : null;
 }
 
-function evaluateStepFrame(step, landmarks) {
+function evaluateStepFrame(step, landmarks, metricOverrides = null) {
   let weightedScoreSum = 0;
   let weightSum = 0;
   let weakestRule = null;
   const ruleScores = [];
 
   step.rules.forEach((rule, index) => {
-    const value = getMetricValue(landmarks, rule.metric);
+    const value = metricOverrides?.[rule.metric] ?? getMetricValue(landmarks, rule.metric);
     if (value === null || Number.isNaN(value)) return;
 
     const diff = Math.abs(value - rule.target);
@@ -342,6 +346,18 @@ function markStepState(index, state, label = "") {
   if (label) item.textContent = label;
 }
 
+function getStepDurationMs(step) {
+  const baseMs = step.holdSeconds * 1000;
+  return demoMode ? baseMs * DEMO_TIME_SCALE : baseMs;
+}
+
+function stopDemoLoop() {
+  if (demoLoopHandle) {
+    clearInterval(demoLoopHandle);
+    demoLoopHandle = null;
+  }
+}
+
 function enterStep(stepIndex) {
   const step = session.routine.steps[stepIndex];
   session.currentStepIndex = stepIndex;
@@ -357,7 +373,8 @@ function enterStep(stepIndex) {
   });
 
   stepNameEl.textContent = step.name;
-  stepTimerEl.textContent = `${step.holdSeconds.toFixed(0)} 秒`;
+  const displaySeconds = getStepDurationMs(step) / 1000;
+  stepTimerEl.textContent = `${displaySeconds.toFixed(1)} 秒`;
   guideText.textContent = step.guide;
   liveHint.textContent = "实时提示：请开始该动作并保持稳定";
   liveScoreEl.textContent = "0";
@@ -391,6 +408,7 @@ function finalizeCurrentStep() {
 
 function finishSession() {
   session.running = false;
+  stopDemoLoop();
   startBtn.disabled = false;
   routineSelect.disabled = false;
 
@@ -434,8 +452,8 @@ function finishSession() {
 }
 
 function startSession() {
-  if (!cameraOn) {
-    updateStatus("请先开启摄像头");
+  if (!cameraOn && !demoMode) {
+    updateStatus("请先开启摄像头或演示模式");
     return;
   }
   session = {
@@ -454,12 +472,21 @@ function startSession() {
   gradeEl.textContent = "--";
   summaryText.textContent = `${session.routine.intro} 完成后会生成整套评分。`;
   adviceList.innerHTML = "";
-  updateStatus(`开始训练：${session.routine.name}`);
+  updateStatus(`开始训练：${session.routine.name}${demoMode ? "（演示模式）" : ""}`);
   enterStep(0);
+
+  if (demoMode) {
+    stopDemoLoop();
+    demoLoopHandle = setInterval(() => {
+      if (!session.running) return;
+      updateSessionWithDemo();
+    }, 180);
+  }
 }
 
 function resetSession() {
   session.running = false;
+  stopDemoLoop();
   session.stepResults = [];
   session.stepStats = [];
   session.currentStepIndex = 0;
@@ -480,7 +507,11 @@ function resetSession() {
   gradeEl.textContent = "--";
   summaryText.textContent = "完成训练后会给出总体建议。";
   adviceList.innerHTML = "";
-  updateStatus(cameraOn ? "摄像头已开启，等待开始整套" : "等待开启摄像头");
+  if (demoMode) {
+    updateStatus("演示模式已开启，等待开始整套");
+  } else {
+    updateStatus(cameraOn ? "摄像头已开启，等待开始整套" : "等待开启摄像头");
+  }
 }
 
 async function ensurePoseDetector() {
@@ -500,6 +531,58 @@ async function ensurePoseDetector() {
 
 function clearCanvas() {
   canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+}
+
+function drawDemoFrame() {
+  const width = videoElement.videoWidth || 960;
+  const height = videoElement.videoHeight || 720;
+  canvasElement.width = width;
+  canvasElement.height = height;
+  canvasCtx.save();
+  canvasCtx.clearRect(0, 0, width, height);
+  canvasCtx.fillStyle = "rgba(2, 6, 23, 0.95)";
+  canvasCtx.fillRect(0, 0, width, height);
+  canvasCtx.fillStyle = "#38bdf8";
+  canvasCtx.font = "700 36px sans-serif";
+  canvasCtx.fillText("演示模式", width / 2 - 90, height / 2 - 12);
+  canvasCtx.fillStyle = "#cbd5e1";
+  canvasCtx.font = "26px sans-serif";
+  canvasCtx.fillText("使用模拟姿态数据进行评分验证", width / 2 - 180, height / 2 + 36);
+  canvasCtx.restore();
+}
+
+function applyFrameResult(step, frameResult, elapsedMs) {
+  const stepDurationMs = getStepDurationMs(step);
+  const remainingSeconds = Math.max(0, stepDurationMs / 1000 - elapsedMs / 1000);
+  stepTimerEl.textContent = `${remainingSeconds.toFixed(1)} 秒`;
+
+  if (frameResult.valid) {
+    const stat = session.stepStats[session.currentStepIndex];
+    stat.scoreSum += frameResult.score;
+    stat.scoreCount += 1;
+    frameResult.ruleScores.forEach((ruleScore) => {
+      const bucket = stat.issueBuckets[ruleScore.index];
+      if (!bucket) return;
+      bucket.complianceSum += ruleScore.compliance;
+      bucket.count += 1;
+    });
+
+    liveScoreEl.textContent = formatScore(frameResult.score);
+    liveScoreEl.style.color = getScoreColor(frameResult.score);
+    liveHint.textContent = `实时提示：${frameResult.weakestHint}`;
+  } else {
+    liveHint.textContent = `实时提示：${frameResult.weakestHint}`;
+  }
+
+  if (elapsedMs >= stepDurationMs) {
+    finalizeCurrentStep();
+    const nextStep = session.currentStepIndex + 1;
+    if (nextStep < session.routine.steps.length) {
+      enterStep(nextStep);
+    } else {
+      finishSession();
+    }
+  }
 }
 
 function drawPose(landmarks, image) {
@@ -524,37 +607,28 @@ function updateSessionWithLandmarks(landmarks) {
   if (!step) return;
 
   const elapsedMs = Date.now() - session.stepStartedAt;
-  const remainingSeconds = Math.max(0, step.holdSeconds - elapsedMs / 1000);
-  stepTimerEl.textContent = `${remainingSeconds.toFixed(1)} 秒`;
-
   const frameResult = evaluateStepFrame(step, landmarks);
-  if (frameResult.valid) {
-    const stat = session.stepStats[session.currentStepIndex];
-    stat.scoreSum += frameResult.score;
-    stat.scoreCount += 1;
-    frameResult.ruleScores.forEach((ruleScore) => {
-      const bucket = stat.issueBuckets[ruleScore.index];
-      if (!bucket) return;
-      bucket.complianceSum += ruleScore.compliance;
-      bucket.count += 1;
-    });
+  applyFrameResult(step, frameResult, elapsedMs);
+}
 
-    liveScoreEl.textContent = formatScore(frameResult.score);
-    liveScoreEl.style.color = getScoreColor(frameResult.score);
-    liveHint.textContent = `实时提示：${frameResult.weakestHint}`;
-  } else {
-    liveHint.textContent = `实时提示：${frameResult.weakestHint}`;
-  }
+function generateDemoMetrics(step) {
+  const metrics = {};
+  step.rules.forEach((rule, idx) => {
+    const wobble = (Math.random() - 0.5) * rule.tolerance * 0.85;
+    const wave = Math.sin(Date.now() / 700 + idx) * rule.tolerance * 0.22;
+    const occasionalDrop = Math.random() < 0.1 ? rule.tolerance * (0.45 + Math.random() * 0.35) : 0;
+    metrics[rule.metric] = rule.target + wobble + wave + occasionalDrop;
+  });
+  return metrics;
+}
 
-  if (elapsedMs >= step.holdSeconds * 1000) {
-    finalizeCurrentStep();
-    const nextStep = session.currentStepIndex + 1;
-    if (nextStep < session.routine.steps.length) {
-      enterStep(nextStep);
-    } else {
-      finishSession();
-    }
-  }
+function updateSessionWithDemo() {
+  const step = session.routine.steps[session.currentStepIndex];
+  if (!step) return;
+  drawDemoFrame();
+  const elapsedMs = Date.now() - session.stepStartedAt;
+  const frameResult = evaluateStepFrame(step, null, generateDemoMetrics(step));
+  applyFrameResult(step, frameResult, elapsedMs);
 }
 
 function onPoseResults(results) {
@@ -565,7 +639,7 @@ function onPoseResults(results) {
     clearCanvas();
   }
 
-  if (session.running) {
+  if (session.running && !demoMode) {
     if (latestLandmarks) {
       updateSessionWithLandmarks(latestLandmarks);
     } else {
@@ -613,11 +687,41 @@ async function toggleCamera() {
   if (session.running) {
     session.running = false;
     routineSelect.disabled = false;
+    stopDemoLoop();
   }
   cameraBtn.textContent = "开启摄像头";
-  startBtn.disabled = true;
-  resetBtn.disabled = true;
-  updateStatus("摄像头已关闭");
+  startBtn.disabled = !demoMode;
+  resetBtn.disabled = !demoMode;
+  updateStatus(demoMode ? "摄像头已关闭，演示模式仍可使用" : "摄像头已关闭");
+}
+
+function toggleDemoMode() {
+  if (session.running) {
+    updateStatus("训练进行中，若要切换模式请先重置");
+    return;
+  }
+
+  demoMode = !demoMode;
+  demoBtn.textContent = demoMode ? "关闭演示模式" : "开启演示模式";
+
+  if (demoMode) {
+    drawDemoFrame();
+    if (!cameraOn) {
+      startBtn.disabled = false;
+      resetBtn.disabled = false;
+    }
+    updateStatus("演示模式已开启，可直接开始整套");
+  } else {
+    stopDemoLoop();
+    if (!cameraOn) {
+      clearCanvas();
+      startBtn.disabled = true;
+      resetBtn.disabled = true;
+      updateStatus("演示模式已关闭，请开启摄像头");
+    } else {
+      updateStatus("演示模式已关闭，当前使用摄像头模式");
+    }
+  }
 }
 
 function init() {
@@ -639,6 +743,7 @@ function init() {
   });
 
   cameraBtn.addEventListener("click", toggleCamera);
+  demoBtn.addEventListener("click", toggleDemoMode);
   startBtn.addEventListener("click", startSession);
   resetBtn.addEventListener("click", resetSession);
   window.addEventListener("beforeunload", () => {
