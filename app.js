@@ -8,6 +8,9 @@ const stepNameEl = document.getElementById("stepName");
 const stepTimerEl = document.getElementById("stepTimer");
 const guideText = document.getElementById("guideText");
 const liveHint = document.getElementById("liveHint");
+const similarityBar = document.getElementById("similarityBar");
+const similarityScoreEl = document.getElementById("similarityScore");
+const metricCompareList = document.getElementById("metricCompareList");
 const liveScoreEl = document.getElementById("liveScore");
 const stepListEl = document.getElementById("stepList");
 const totalScoreEl = document.getElementById("totalScore");
@@ -163,6 +166,15 @@ let session = {
 
 const REQUIRED_VISIBILITY = 0.42;
 const DEMO_TIME_SCALE = 0.2;
+const METRIC_LABELS = {
+  leftElbow: "左肘角度",
+  rightElbow: "右肘角度",
+  leftKnee: "左膝角度",
+  rightKnee: "右膝角度",
+  shoulderLevel: "肩线水平",
+  stanceWidth: "步幅宽度",
+  torsoLean: "躯干倾角",
+};
 const POSE_INDEX = {
   leftShoulder: 11,
   rightShoulder: 12,
@@ -184,6 +196,13 @@ function clamp(num, min, max) {
 
 function formatScore(score) {
   return Number.isFinite(score) ? String(Math.round(score)) : "--";
+}
+
+function formatMetricValue(metricName, value) {
+  if (!Number.isFinite(value)) return "--";
+  const degreesMetrics = ["leftElbow", "rightElbow", "leftKnee", "rightKnee", "torsoLean"];
+  if (degreesMetrics.includes(metricName)) return `${value.toFixed(0)}°`;
+  return `${value.toFixed(1)}`;
 }
 
 function updateStatus(text) {
@@ -281,7 +300,16 @@ function evaluateStepFrame(step, landmarks, metricOverrides = null) {
 
     weightedScoreSum += score * rule.weight;
     weightSum += rule.weight;
-    ruleScores.push({ index, score, compliance, hint: rule.hint, diff });
+    ruleScores.push({
+      index,
+      score,
+      compliance,
+      hint: rule.hint,
+      diff,
+      metric: rule.metric,
+      target: rule.target,
+      value,
+    });
 
     if (!weakestRule || compliance < weakestRule.compliance) {
       weakestRule = { ...ruleScores[ruleScores.length - 1] };
@@ -304,6 +332,33 @@ function getScoreColor(score) {
   if (score >= 85) return "var(--ok)";
   if (score >= 65) return "var(--warn)";
   return "var(--bad)";
+}
+
+function renderRealtimeFollow(step, frameResult) {
+  const score = clamp(frameResult?.score ?? 0, 0, 100);
+  similarityBar.style.width = `${score.toFixed(1)}%`;
+  similarityScoreEl.textContent = `${Math.round(score)}%`;
+  similarityScoreEl.style.color = getScoreColor(score);
+
+  metricCompareList.innerHTML = "";
+  step.rules.forEach((rule, idx) => {
+    const detail = frameResult?.ruleScores?.find((item) => item.index === idx) || null;
+    const li = document.createElement("li");
+    const label = METRIC_LABELS[rule.metric] || rule.metric;
+    if (!detail) {
+      li.textContent = `${label}：等待识别`;
+      li.style.color = "#94a3b8";
+      metricCompareList.appendChild(li);
+      return;
+    }
+
+    const currentText = formatMetricValue(rule.metric, detail.value);
+    const targetText = formatMetricValue(rule.metric, detail.target);
+    const quality = detail.compliance >= 0.8 ? "标准" : detail.compliance >= 0.55 ? "可优化" : "偏差较大";
+    li.textContent = `${label}：目标 ${targetText} / 当前 ${currentText}（${quality}）`;
+    li.style.color = detail.compliance >= 0.8 ? "#86efac" : detail.compliance >= 0.55 ? "#fde68a" : "#fca5a5";
+    metricCompareList.appendChild(li);
+  });
 }
 
 function speak(text) {
@@ -379,6 +434,7 @@ function enterStep(stepIndex) {
   liveHint.textContent = "实时提示：请开始该动作并保持稳定";
   liveScoreEl.textContent = "0";
   liveScoreEl.style.color = "var(--text)";
+  renderRealtimeFollow(step, { score: 0, ruleScores: [] });
   speak(`第${stepIndex + 1}式，${step.name}。${step.guide}`);
 }
 
@@ -492,11 +548,12 @@ function resetSession() {
   session.currentStepIndex = 0;
   session.stepStartedAt = 0;
   routineSelect.disabled = false;
-  startBtn.disabled = !cameraOn;
-  resetBtn.disabled = !cameraOn;
+  startBtn.disabled = !cameraOn && !demoMode;
+  resetBtn.disabled = !cameraOn && !demoMode;
 
   const routine = getCurrentRoutine();
   renderStepList(routine);
+  renderRealtimeFollow(routine.steps[0], { score: 0, ruleScores: [] });
   stepNameEl.textContent = "未开始";
   stepTimerEl.textContent = "--";
   guideText.textContent = "请按提示逐式完成动作。";
@@ -573,6 +630,7 @@ function applyFrameResult(step, frameResult, elapsedMs) {
   } else {
     liveHint.textContent = `实时提示：${frameResult.weakestHint}`;
   }
+  renderRealtimeFollow(step, frameResult);
 
   if (elapsedMs >= stepDurationMs) {
     finalizeCurrentStep();
@@ -644,6 +702,8 @@ function onPoseResults(results) {
       updateSessionWithLandmarks(latestLandmarks);
     } else {
       liveHint.textContent = "实时提示：未检测到人体，请完整入镜";
+      const step = session.routine.steps[session.currentStepIndex];
+      if (step) renderRealtimeFollow(step, { score: 0, ruleScores: [] });
     }
   }
 }
@@ -729,10 +789,12 @@ function init() {
   routineSelect.value = ROUTINES[0].id;
   renderStepList(ROUTINES[0]);
   guideText.textContent = ROUTINES[0].intro;
+  renderRealtimeFollow(ROUTINES[0].steps[0], { score: 0, ruleScores: [] });
 
   routineSelect.addEventListener("change", () => {
     const routine = getCurrentRoutine();
     renderStepList(routine);
+    renderRealtimeFollow(routine.steps[0], { score: 0, ruleScores: [] });
     guideText.textContent = routine.intro;
     liveHint.textContent = "实时提示：切换成功，请准备动作";
     updateStatus(`已切换版本：${routine.name}`);

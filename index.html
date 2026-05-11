@@ -48,6 +48,17 @@
         <p id="guideText" class="guide">请先选择版本并开启摄像头。</p>
         <p id="liveHint" class="hint">实时提示：等待姿态识别...</p>
 
+        <div class="realtime-follow-box">
+          <p class="follow-title">实时跟练展示</p>
+          <div class="similarity-track">
+            <div id="similarityBar" class="similarity-bar"></div>
+          </div>
+          <p class="similarity-text">
+            跟练匹配度：<strong id="similarityScore">0%</strong>
+          </p>
+          <ul id="metricCompareList" class="metric-compare-list"></ul>
+        </div>
+
         <div class="score-box">
           <p>当前动作得分</p>
           <strong id="liveScore">0</strong>
