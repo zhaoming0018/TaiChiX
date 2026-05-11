@@ -1,5 +1,6 @@
 const routineSelect = document.getElementById("routineSelect");
 const cameraBtn = document.getElementById("cameraBtn");
+const demoBtn = document.getElementById("demoBtn");
 const startBtn = document.getElementById("startBtn");
 const resetBtn = document.getElementById("resetBtn");
 const statusText = document.getElementById("statusText");
@@ -7,6 +8,9 @@ const stepNameEl = document.getElementById("stepName");
 const stepTimerEl = document.getElementById("stepTimer");
 const guideText = document.getElementById("guideText");
 const liveHint = document.getElementById("liveHint");
+const similarityBar = document.getElementById("similarityBar");
+const similarityScoreEl = document.getElementById("similarityScore");
+const metricCompareList = document.getElementById("metricCompareList");
 const liveScoreEl = document.getElementById("liveScore");
 const stepListEl = document.getElementById("stepList");
 const totalScoreEl = document.getElementById("totalScore");
@@ -16,6 +20,13 @@ const adviceList = document.getElementById("adviceList");
 const voiceGuideToggle = document.getElementById("voiceGuideToggle");
 const videoElement = document.getElementById("video");
 const canvasElement = document.getElementById("overlay");
+const coachVideo = document.getElementById("coachVideo");
+const coachSourceSelect = document.getElementById("coachSourceSelect");
+const coachUpload = document.getElementById("coachUpload");
+const coachStatus = document.getElementById("coachStatus");
+const coachPlayBtn = document.getElementById("coachPlayBtn");
+const coachRestartBtn = document.getElementById("coachRestartBtn");
+const coachHint = document.getElementById("coachHint");
 const canvasCtx = canvasElement.getContext("2d");
 
 const ROUTINES = [
@@ -144,10 +155,21 @@ const ROUTINES = [
   },
 ];
 
+const COACH_VIDEO_SOURCES = [
+  {
+    id: "archive_taichi_health",
+    name: "内置真人太极教学（Tai Chi For Health）",
+    url: "https://ia902804.us.archive.org/20/items/tai-chi-for-health/Tai%20Chi%20for%20Health.mp4",
+  },
+];
+
 let poseDetector = null;
 let camera = null;
 let cameraOn = false;
 let latestLandmarks = null;
+let demoMode = false;
+let demoLoopHandle = null;
+let coachObjectUrl = null;
 
 let session = {
   running: false,
@@ -159,6 +181,16 @@ let session = {
 };
 
 const REQUIRED_VISIBILITY = 0.42;
+const DEMO_TIME_SCALE = 0.2;
+const METRIC_LABELS = {
+  leftElbow: "左肘角度",
+  rightElbow: "右肘角度",
+  leftKnee: "左膝角度",
+  rightKnee: "右膝角度",
+  shoulderLevel: "肩线水平",
+  stanceWidth: "步幅宽度",
+  torsoLean: "躯干倾角",
+};
 const POSE_INDEX = {
   leftShoulder: 11,
   rightShoulder: 12,
@@ -182,8 +214,27 @@ function formatScore(score) {
   return Number.isFinite(score) ? String(Math.round(score)) : "--";
 }
 
+function formatMetricValue(metricName, value) {
+  if (!Number.isFinite(value)) return "--";
+  const degreesMetrics = ["leftElbow", "rightElbow", "leftKnee", "rightKnee", "torsoLean"];
+  if (degreesMetrics.includes(metricName)) return `${value.toFixed(0)}°`;
+  return `${value.toFixed(1)}`;
+}
+
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds)) return "--:--";
+  const total = Math.max(0, Math.round(seconds));
+  const min = String(Math.floor(total / 60)).padStart(2, "0");
+  const sec = String(total % 60).padStart(2, "0");
+  return `${min}:${sec}`;
+}
+
 function updateStatus(text) {
   statusText.textContent = `状态：${text}`;
+}
+
+function setCoachStatus(text) {
+  coachStatus.textContent = `示范视频：${text}`;
 }
 
 function calcAngle(a, b, c) {
@@ -261,14 +312,14 @@ function getMetricValue(landmarks, metricName) {
   return fn ? fn() : null;
 }
 
-function evaluateStepFrame(step, landmarks) {
+function evaluateStepFrame(step, landmarks, metricOverrides = null) {
   let weightedScoreSum = 0;
   let weightSum = 0;
   let weakestRule = null;
   const ruleScores = [];
 
   step.rules.forEach((rule, index) => {
-    const value = getMetricValue(landmarks, rule.metric);
+    const value = metricOverrides?.[rule.metric] ?? getMetricValue(landmarks, rule.metric);
     if (value === null || Number.isNaN(value)) return;
 
     const diff = Math.abs(value - rule.target);
@@ -277,7 +328,16 @@ function evaluateStepFrame(step, landmarks) {
 
     weightedScoreSum += score * rule.weight;
     weightSum += rule.weight;
-    ruleScores.push({ index, score, compliance, hint: rule.hint, diff });
+    ruleScores.push({
+      index,
+      score,
+      compliance,
+      hint: rule.hint,
+      diff,
+      metric: rule.metric,
+      target: rule.target,
+      value,
+    });
 
     if (!weakestRule || compliance < weakestRule.compliance) {
       weakestRule = { ...ruleScores[ruleScores.length - 1] };
@@ -300,6 +360,78 @@ function getScoreColor(score) {
   if (score >= 85) return "var(--ok)";
   if (score >= 65) return "var(--warn)";
   return "var(--bad)";
+}
+
+function renderRealtimeFollow(step, frameResult) {
+  const score = clamp(frameResult?.score ?? 0, 0, 100);
+  similarityBar.style.width = `${score.toFixed(1)}%`;
+  similarityScoreEl.textContent = `${Math.round(score)}%`;
+  similarityScoreEl.style.color = getScoreColor(score);
+
+  metricCompareList.innerHTML = "";
+  step.rules.forEach((rule, idx) => {
+    const detail = frameResult?.ruleScores?.find((item) => item.index === idx) || null;
+    const li = document.createElement("li");
+    const label = METRIC_LABELS[rule.metric] || rule.metric;
+    if (!detail) {
+      li.textContent = `${label}：等待识别`;
+      li.style.color = "#94a3b8";
+      metricCompareList.appendChild(li);
+      return;
+    }
+
+    const currentText = formatMetricValue(rule.metric, detail.value);
+    const targetText = formatMetricValue(rule.metric, detail.target);
+    const quality = detail.compliance >= 0.8 ? "标准" : detail.compliance >= 0.55 ? "可优化" : "偏差较大";
+    li.textContent = `${label}：目标 ${targetText} / 当前 ${currentText}（${quality}）`;
+    li.style.color = detail.compliance >= 0.8 ? "#86efac" : detail.compliance >= 0.55 ? "#fde68a" : "#fca5a5";
+    metricCompareList.appendChild(li);
+  });
+}
+
+function updateCoachPlayButton() {
+  coachPlayBtn.textContent = coachVideo.paused ? "播放示范视频" : "暂停示范视频";
+}
+
+function loadCoachVideo(url, sourceLabel, fromUpload = false) {
+  coachVideo.src = url;
+  coachVideo.load();
+  const suffix = fromUpload ? "（本地上传）" : "";
+  setCoachStatus(`正在加载：${sourceLabel}${suffix}`);
+  coachHint.textContent = "提示：点击“开始整套”后会自动播放示范视频。";
+  updateCoachPlayButton();
+}
+
+function maybePlayCoachVideo() {
+  if (coachVideo.readyState < 2) return;
+  if (Number.isFinite(coachVideo.duration) && coachVideo.currentTime > coachVideo.duration - 5) {
+    coachVideo.currentTime = 0;
+  }
+  coachVideo
+    .play()
+    .then(() => {
+      setCoachStatus("示范视频播放中");
+      updateCoachPlayButton();
+    })
+    .catch(() => {
+      setCoachStatus("自动播放失败，请点击“播放示范视频”");
+      updateCoachPlayButton();
+    });
+}
+
+function populateCoachSources() {
+  coachSourceSelect.innerHTML = "";
+  COACH_VIDEO_SOURCES.forEach((source) => {
+    const option = document.createElement("option");
+    option.value = source.id;
+    option.textContent = source.name;
+    coachSourceSelect.appendChild(option);
+  });
+  const first = COACH_VIDEO_SOURCES[0];
+  if (first) {
+    coachSourceSelect.value = first.id;
+    loadCoachVideo(first.url, first.name, false);
+  }
 }
 
 function speak(text) {
@@ -342,6 +474,18 @@ function markStepState(index, state, label = "") {
   if (label) item.textContent = label;
 }
 
+function getStepDurationMs(step) {
+  const baseMs = step.holdSeconds * 1000;
+  return demoMode ? baseMs * DEMO_TIME_SCALE : baseMs;
+}
+
+function stopDemoLoop() {
+  if (demoLoopHandle) {
+    clearInterval(demoLoopHandle);
+    demoLoopHandle = null;
+  }
+}
+
 function enterStep(stepIndex) {
   const step = session.routine.steps[stepIndex];
   session.currentStepIndex = stepIndex;
@@ -357,11 +501,14 @@ function enterStep(stepIndex) {
   });
 
   stepNameEl.textContent = step.name;
-  stepTimerEl.textContent = `${step.holdSeconds.toFixed(0)} 秒`;
+  const displaySeconds = getStepDurationMs(step) / 1000;
+  stepTimerEl.textContent = `${displaySeconds.toFixed(1)} 秒`;
   guideText.textContent = step.guide;
   liveHint.textContent = "实时提示：请开始该动作并保持稳定";
+  coachHint.textContent = `视频跟练动作：${step.name}（跟着示范视频节奏练习）`;
   liveScoreEl.textContent = "0";
   liveScoreEl.style.color = "var(--text)";
+  renderRealtimeFollow(step, { score: 0, ruleScores: [] });
   speak(`第${stepIndex + 1}式，${step.name}。${step.guide}`);
 }
 
@@ -391,6 +538,7 @@ function finalizeCurrentStep() {
 
 function finishSession() {
   session.running = false;
+  stopDemoLoop();
   startBtn.disabled = false;
   routineSelect.disabled = false;
 
@@ -427,6 +575,7 @@ function finishSession() {
 
   liveHint.textContent = "实时提示：整套动作已完成";
   guideText.textContent = "训练完成，查看右侧总结并重复练习薄弱动作。";
+  coachHint.textContent = "提示：整套已完成，可回放示范视频继续跟练。";
   stepNameEl.textContent = "已完成";
   stepTimerEl.textContent = "0 秒";
   updateStatus(`训练完成，总分 ${formatScore(total)}（${grade}）`);
@@ -434,8 +583,8 @@ function finishSession() {
 }
 
 function startSession() {
-  if (!cameraOn) {
-    updateStatus("请先开启摄像头");
+  if (!cameraOn && !demoMode) {
+    updateStatus("请先开启摄像头或演示模式");
     return;
   }
   session = {
@@ -454,22 +603,36 @@ function startSession() {
   gradeEl.textContent = "--";
   summaryText.textContent = `${session.routine.intro} 完成后会生成整套评分。`;
   adviceList.innerHTML = "";
-  updateStatus(`开始训练：${session.routine.name}`);
+  updateStatus(`开始训练：${session.routine.name}${demoMode ? "（演示模式）" : ""}`);
+  maybePlayCoachVideo();
   enterStep(0);
+
+  if (demoMode) {
+    stopDemoLoop();
+    demoLoopHandle = setInterval(() => {
+      if (!session.running) return;
+      updateSessionWithDemo();
+    }, 180);
+  }
 }
 
 function resetSession() {
   session.running = false;
+  stopDemoLoop();
   session.stepResults = [];
   session.stepStats = [];
   session.currentStepIndex = 0;
   session.stepStartedAt = 0;
   routineSelect.disabled = false;
-  startBtn.disabled = !cameraOn;
-  resetBtn.disabled = !cameraOn;
+  startBtn.disabled = !cameraOn && !demoMode;
+  resetBtn.disabled = !cameraOn && !demoMode;
 
   const routine = getCurrentRoutine();
   renderStepList(routine);
+  renderRealtimeFollow(routine.steps[0], { score: 0, ruleScores: [] });
+  if (!coachVideo.paused) coachVideo.pause();
+  coachHint.textContent = "提示：点击“开始整套”后会自动播放示范视频。";
+  updateCoachPlayButton();
   stepNameEl.textContent = "未开始";
   stepTimerEl.textContent = "--";
   guideText.textContent = "请按提示逐式完成动作。";
@@ -480,7 +643,11 @@ function resetSession() {
   gradeEl.textContent = "--";
   summaryText.textContent = "完成训练后会给出总体建议。";
   adviceList.innerHTML = "";
-  updateStatus(cameraOn ? "摄像头已开启，等待开始整套" : "等待开启摄像头");
+  if (demoMode) {
+    updateStatus("演示模式已开启，等待开始整套");
+  } else {
+    updateStatus(cameraOn ? "摄像头已开启，等待开始整套" : "等待开启摄像头");
+  }
 }
 
 async function ensurePoseDetector() {
@@ -500,6 +667,59 @@ async function ensurePoseDetector() {
 
 function clearCanvas() {
   canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+}
+
+function drawDemoFrame() {
+  const width = videoElement.videoWidth || 960;
+  const height = videoElement.videoHeight || 720;
+  canvasElement.width = width;
+  canvasElement.height = height;
+  canvasCtx.save();
+  canvasCtx.clearRect(0, 0, width, height);
+  canvasCtx.fillStyle = "rgba(2, 6, 23, 0.95)";
+  canvasCtx.fillRect(0, 0, width, height);
+  canvasCtx.fillStyle = "#38bdf8";
+  canvasCtx.font = "700 36px sans-serif";
+  canvasCtx.fillText("演示模式", width / 2 - 90, height / 2 - 12);
+  canvasCtx.fillStyle = "#cbd5e1";
+  canvasCtx.font = "26px sans-serif";
+  canvasCtx.fillText("使用模拟姿态数据进行评分验证", width / 2 - 180, height / 2 + 36);
+  canvasCtx.restore();
+}
+
+function applyFrameResult(step, frameResult, elapsedMs) {
+  const stepDurationMs = getStepDurationMs(step);
+  const remainingSeconds = Math.max(0, stepDurationMs / 1000 - elapsedMs / 1000);
+  stepTimerEl.textContent = `${remainingSeconds.toFixed(1)} 秒`;
+
+  if (frameResult.valid) {
+    const stat = session.stepStats[session.currentStepIndex];
+    stat.scoreSum += frameResult.score;
+    stat.scoreCount += 1;
+    frameResult.ruleScores.forEach((ruleScore) => {
+      const bucket = stat.issueBuckets[ruleScore.index];
+      if (!bucket) return;
+      bucket.complianceSum += ruleScore.compliance;
+      bucket.count += 1;
+    });
+
+    liveScoreEl.textContent = formatScore(frameResult.score);
+    liveScoreEl.style.color = getScoreColor(frameResult.score);
+    liveHint.textContent = `实时提示：${frameResult.weakestHint}`;
+  } else {
+    liveHint.textContent = `实时提示：${frameResult.weakestHint}`;
+  }
+  renderRealtimeFollow(step, frameResult);
+
+  if (elapsedMs >= stepDurationMs) {
+    finalizeCurrentStep();
+    const nextStep = session.currentStepIndex + 1;
+    if (nextStep < session.routine.steps.length) {
+      enterStep(nextStep);
+    } else {
+      finishSession();
+    }
+  }
 }
 
 function drawPose(landmarks, image) {
@@ -524,37 +744,28 @@ function updateSessionWithLandmarks(landmarks) {
   if (!step) return;
 
   const elapsedMs = Date.now() - session.stepStartedAt;
-  const remainingSeconds = Math.max(0, step.holdSeconds - elapsedMs / 1000);
-  stepTimerEl.textContent = `${remainingSeconds.toFixed(1)} 秒`;
-
   const frameResult = evaluateStepFrame(step, landmarks);
-  if (frameResult.valid) {
-    const stat = session.stepStats[session.currentStepIndex];
-    stat.scoreSum += frameResult.score;
-    stat.scoreCount += 1;
-    frameResult.ruleScores.forEach((ruleScore) => {
-      const bucket = stat.issueBuckets[ruleScore.index];
-      if (!bucket) return;
-      bucket.complianceSum += ruleScore.compliance;
-      bucket.count += 1;
-    });
+  applyFrameResult(step, frameResult, elapsedMs);
+}
 
-    liveScoreEl.textContent = formatScore(frameResult.score);
-    liveScoreEl.style.color = getScoreColor(frameResult.score);
-    liveHint.textContent = `实时提示：${frameResult.weakestHint}`;
-  } else {
-    liveHint.textContent = `实时提示：${frameResult.weakestHint}`;
-  }
+function generateDemoMetrics(step) {
+  const metrics = {};
+  step.rules.forEach((rule, idx) => {
+    const wobble = (Math.random() - 0.5) * rule.tolerance * 0.85;
+    const wave = Math.sin(Date.now() / 700 + idx) * rule.tolerance * 0.22;
+    const occasionalDrop = Math.random() < 0.1 ? rule.tolerance * (0.45 + Math.random() * 0.35) : 0;
+    metrics[rule.metric] = rule.target + wobble + wave + occasionalDrop;
+  });
+  return metrics;
+}
 
-  if (elapsedMs >= step.holdSeconds * 1000) {
-    finalizeCurrentStep();
-    const nextStep = session.currentStepIndex + 1;
-    if (nextStep < session.routine.steps.length) {
-      enterStep(nextStep);
-    } else {
-      finishSession();
-    }
-  }
+function updateSessionWithDemo() {
+  const step = session.routine.steps[session.currentStepIndex];
+  if (!step) return;
+  drawDemoFrame();
+  const elapsedMs = Date.now() - session.stepStartedAt;
+  const frameResult = evaluateStepFrame(step, null, generateDemoMetrics(step));
+  applyFrameResult(step, frameResult, elapsedMs);
 }
 
 function onPoseResults(results) {
@@ -565,11 +776,13 @@ function onPoseResults(results) {
     clearCanvas();
   }
 
-  if (session.running) {
+  if (session.running && !demoMode) {
     if (latestLandmarks) {
       updateSessionWithLandmarks(latestLandmarks);
     } else {
       liveHint.textContent = "实时提示：未检测到人体，请完整入镜";
+      const step = session.routine.steps[session.currentStepIndex];
+      if (step) renderRealtimeFollow(step, { score: 0, ruleScores: [] });
     }
   }
 }
@@ -613,23 +826,58 @@ async function toggleCamera() {
   if (session.running) {
     session.running = false;
     routineSelect.disabled = false;
+    stopDemoLoop();
   }
   cameraBtn.textContent = "开启摄像头";
-  startBtn.disabled = true;
-  resetBtn.disabled = true;
-  updateStatus("摄像头已关闭");
+  startBtn.disabled = !demoMode;
+  resetBtn.disabled = !demoMode;
+  updateStatus(demoMode ? "摄像头已关闭，演示模式仍可使用" : "摄像头已关闭");
+}
+
+function toggleDemoMode() {
+  if (session.running) {
+    updateStatus("训练进行中，若要切换模式请先重置");
+    return;
+  }
+
+  demoMode = !demoMode;
+  demoBtn.textContent = demoMode ? "关闭演示模式" : "开启演示模式";
+
+  if (demoMode) {
+    drawDemoFrame();
+    if (!cameraOn) {
+      startBtn.disabled = false;
+      resetBtn.disabled = false;
+    }
+    updateStatus("演示模式已开启，可直接开始整套");
+  } else {
+    stopDemoLoop();
+    if (!cameraOn) {
+      clearCanvas();
+      startBtn.disabled = true;
+      resetBtn.disabled = true;
+      updateStatus("演示模式已关闭，请开启摄像头");
+    } else {
+      updateStatus("演示模式已关闭，当前使用摄像头模式");
+    }
+  }
 }
 
 function init() {
+  populateCoachSources();
   renderRoutineOptions();
   routineSelect.value = ROUTINES[0].id;
   renderStepList(ROUTINES[0]);
   guideText.textContent = ROUTINES[0].intro;
+  renderRealtimeFollow(ROUTINES[0].steps[0], { score: 0, ruleScores: [] });
+  updateCoachPlayButton();
 
   routineSelect.addEventListener("change", () => {
     const routine = getCurrentRoutine();
     renderStepList(routine);
+    renderRealtimeFollow(routine.steps[0], { score: 0, ruleScores: [] });
     guideText.textContent = routine.intro;
+    coachHint.textContent = `提示：当前版本为 ${routine.name}，可按示范视频同步练习。`;
     liveHint.textContent = "实时提示：切换成功，请准备动作";
     updateStatus(`已切换版本：${routine.name}`);
     totalScoreEl.textContent = "--";
@@ -638,11 +886,57 @@ function init() {
     adviceList.innerHTML = "";
   });
 
+  coachSourceSelect.addEventListener("change", () => {
+    const source = COACH_VIDEO_SOURCES.find((item) => item.id === coachSourceSelect.value);
+    if (!source) return;
+    if (coachObjectUrl) {
+      URL.revokeObjectURL(coachObjectUrl);
+      coachObjectUrl = null;
+    }
+    coachUpload.value = "";
+    loadCoachVideo(source.url, source.name, false);
+  });
+
+  coachUpload.addEventListener("change", (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (coachObjectUrl) URL.revokeObjectURL(coachObjectUrl);
+    coachObjectUrl = URL.createObjectURL(file);
+    loadCoachVideo(coachObjectUrl, file.name, true);
+  });
+
+  coachPlayBtn.addEventListener("click", () => {
+    if (coachVideo.paused) {
+      maybePlayCoachVideo();
+    } else {
+      coachVideo.pause();
+      setCoachStatus("示范视频已暂停");
+      updateCoachPlayButton();
+    }
+  });
+
+  coachRestartBtn.addEventListener("click", () => {
+    coachVideo.currentTime = 0;
+    maybePlayCoachVideo();
+  });
+
+  coachVideo.addEventListener("loadedmetadata", () => {
+    setCoachStatus(`已就绪（时长 ${formatDuration(coachVideo.duration)}）`);
+  });
+  coachVideo.addEventListener("play", updateCoachPlayButton);
+  coachVideo.addEventListener("pause", updateCoachPlayButton);
+  coachVideo.addEventListener("error", () => {
+    setCoachStatus("加载失败，请切换内置视频或上传本地视频");
+    updateCoachPlayButton();
+  });
+
   cameraBtn.addEventListener("click", toggleCamera);
+  demoBtn.addEventListener("click", toggleDemoMode);
   startBtn.addEventListener("click", startSession);
   resetBtn.addEventListener("click", resetSession);
   window.addEventListener("beforeunload", () => {
     if (window.speechSynthesis) window.speechSynthesis.cancel();
+    if (coachObjectUrl) URL.revokeObjectURL(coachObjectUrl);
   });
 }
 

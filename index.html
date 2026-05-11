@@ -25,6 +25,7 @@
 
         <div class="button-row">
           <button id="cameraBtn" type="button">开启摄像头</button>
+          <button id="demoBtn" type="button">开启演示模式</button>
           <button id="startBtn" type="button" disabled>开始整套</button>
           <button id="resetBtn" type="button" disabled>重置</button>
         </div>
@@ -40,12 +41,43 @@
         </div>
       </section>
 
+      <section class="panel coach-panel">
+        <h2>真人示范视频跟练</h2>
+        <div class="coach-stage">
+          <video id="coachVideo" controls playsinline preload="metadata"></video>
+        </div>
+        <p id="coachStatus" class="coach-status">示范视频：准备加载</p>
+
+        <label for="coachSourceSelect">内置示范视频</label>
+        <select id="coachSourceSelect"></select>
+
+        <label for="coachUpload">上传你自己的跟练视频（可选）</label>
+        <input id="coachUpload" type="file" accept="video/*" />
+
+        <div class="button-row">
+          <button id="coachPlayBtn" type="button">播放示范视频</button>
+          <button id="coachRestartBtn" type="button">从头播放</button>
+        </div>
+        <p id="coachHint" class="coach-hint">提示：点击“开始整套”后会自动播放示范视频。</p>
+      </section>
+
       <section class="panel progress-panel">
         <h2>引导与评分</h2>
         <p class="step-name">当前动作：<strong id="stepName">未开始</strong></p>
         <p class="timer">剩余时间：<strong id="stepTimer">--</strong></p>
         <p id="guideText" class="guide">请先选择版本并开启摄像头。</p>
         <p id="liveHint" class="hint">实时提示：等待姿态识别...</p>
+
+        <div class="realtime-follow-box">
+          <p class="follow-title">实时跟练展示</p>
+          <div class="similarity-track">
+            <div id="similarityBar" class="similarity-bar"></div>
+          </div>
+          <p class="similarity-text">
+            跟练匹配度：<strong id="similarityScore">0%</strong>
+          </p>
+          <ul id="metricCompareList" class="metric-compare-list"></ul>
+        </div>
 
         <div class="score-box">
           <p>当前动作得分</p>
